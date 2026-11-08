@@ -858,3 +858,124 @@ class ParallelMCPRuntimeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _hit(url, title=None, item_id="W1"):
+    return {"id": item_id, "title": title or url, "url": url, "snippet": "", "date": "2026-03-01",
+            "metadata": {}}
+
+
+class MultiWebBackendTests(unittest.TestCase):
+    DR = ("2026-02-25", "2026-03-27")
+    KEYS = {"EXA_API_KEY": "e", "PARALLEL_API_KEY": "p", "KEENABLE_API_KEY": "k"}
+
+    def _patched(self, exa=None, parallel=None, keenable=None):
+        return (
+            patch("lib.grounding.exa_search", **_mock_kw(exa)),
+            patch("lib.grounding.parallel_search", **_mock_kw(parallel)),
+            patch("lib.grounding.keenable_search", **_mock_kw(keenable)),
+        )
+
+    def test_env_list_fans_out_merges_round_robin_and_dedupes(self):
+        config = dict(self.KEYS, LAST30DAYS_WEB_BACKENDS="exa,parallel,keenable")
+        exa = ([_hit("https://a.com/1", item_id="WE1"), _hit("https://b.com/2", item_id="WE2")], {"label": "exa"})
+        par = ([_hit("https://www.a.com/1/", item_id="WP1"), _hit("https://c.com/3", item_id="WP2")], {"label": "parallel"})
+        kee = ([_hit("https://d.com/4", item_id="WK1")], {"label": "keenable"})
+        p1, p2, p3 = self._patched(exa, par, kee)
+        with p1 as m_exa, p2 as m_par, p3 as m_kee:
+            items, artifact = grounding.web_search("q", self.DR, config, backend="auto")
+        m_exa.assert_called_once(); m_par.assert_called_once(); m_kee.assert_called_once()
+        # Round-robin by rank: exa#1, (parallel#1 is a dup of exa#1), keenable#1, exa#2, parallel#2
+        self.assertEqual(
+            ["https://a.com/1", "https://d.com/4", "https://b.com/2", "https://c.com/3"],
+            [i["url"] for i in items],
+        )
+        self.assertEqual(["exa", "parallel"], items[0]["metadata"]["web_backends"])
+        self.assertEqual(["keenable"], items[1]["metadata"]["web_backends"])
+        self.assertEqual("exa+parallel+keenable", artifact["label"])
+        self.assertEqual(4, artifact["resultCount"])
+        self.assertEqual({"exa": 2, "parallel": 2, "keenable": 1}, artifact["backends"])
+        self.assertEqual(len({i["id"] for i in items}), len(items))
+
+    def test_all_uses_every_keyed_backend_with_a_key(self):
+        config = dict(self.KEYS)
+        p1, p2, p3 = self._patched(([], {}), ([], {}), ([], {}))
+        with p1 as m_exa, p2 as m_par, p3 as m_kee, \
+             patch("lib.grounding.brave_search") as m_brave:
+            grounding.web_search("q", self.DR, config, backend="all")
+        m_exa.assert_called_once(); m_par.assert_called_once(); m_kee.assert_called_once()
+        m_brave.assert_not_called()
+
+    def test_env_all_value(self):
+        config = dict(self.KEYS, LAST30DAYS_WEB_BACKENDS="all")
+        p1, p2, p3 = self._patched(([], {}), ([], {}), ([], {}))
+        with p1 as m_exa, p2 as m_par, p3 as m_kee:
+            grounding.web_search("q", self.DR, config, backend="auto")
+        m_exa.assert_called_once(); m_par.assert_called_once(); m_kee.assert_called_once()
+
+    def test_one_backend_failing_keeps_the_others(self):
+        config = dict(self.KEYS, LAST30DAYS_WEB_BACKENDS="exa,parallel,keenable")
+        p1, p2, p3 = self._patched(
+            ([_hit("https://a.com/1", item_id="WE1")], {}),
+            RuntimeError("parallel down"),
+            ([_hit("https://d.com/4", item_id="WK1")], {}),
+        )
+        with p1, p2, p3:
+            items, artifact = grounding.web_search("q", self.DR, config, backend="auto")
+        self.assertEqual(["https://a.com/1", "https://d.com/4"], [i["url"] for i in items])
+        self.assertEqual("exa+keenable", artifact["label"])
+        self.assertEqual("error", artifact["backends"]["parallel"])
+
+    def test_all_backends_failing_raises(self):
+        config = dict(self.KEYS, LAST30DAYS_WEB_BACKENDS="exa,keenable")
+        p1, p2, p3 = self._patched(RuntimeError("exa down"), ([], {}), RuntimeError("keenable down"))
+        with p1, p2, p3:
+            with self.assertRaises(RuntimeError):
+                grounding.web_search("q", self.DR, config, backend="auto")
+
+    def test_env_list_skips_backends_without_keys_and_unknown_names(self):
+        config = {"EXA_API_KEY": "e", "LAST30DAYS_WEB_BACKENDS": "exa, keenable, bogus"}
+        with patch("lib.grounding.exa_search", return_value=([], {"label": "exa"})) as m_exa, \
+             patch("lib.grounding.keenable_search") as m_kee:
+            _, artifact = grounding.web_search("q", self.DR, config, backend="auto")
+        m_exa.assert_called_once()
+        m_kee.assert_not_called()
+        self.assertEqual("exa", artifact["label"])
+
+    def test_explicit_single_backend_ignores_env_list(self):
+        config = dict(self.KEYS, LAST30DAYS_WEB_BACKENDS="all")
+        p1, p2, p3 = self._patched(([], {}), ([], {}), ([], {}))
+        with p1 as m_exa, p2 as m_par, p3 as m_kee:
+            grounding.web_search("q", self.DR, config, backend="keenable")
+        m_kee.assert_called_once(); m_exa.assert_not_called(); m_par.assert_not_called()
+
+    def test_all_without_any_key_raises(self):
+        with self.assertRaises(RuntimeError):
+            grounding.web_search("q", self.DR, {}, backend="all")
+
+    def test_without_env_list_auto_is_unchanged(self):
+        p1, p2, p3 = self._patched(([], {}), ([], {}), ([], {}))
+        with p1 as m_exa, p2 as m_par, p3 as m_kee:
+            grounding.web_search("q", self.DR, dict(self.KEYS), backend="auto")
+        m_exa.assert_called_once(); m_par.assert_not_called(); m_kee.assert_not_called()
+
+    def test_per_backend_http_failures_do_not_leak_into_the_source_sink(self):
+        from lib import http as lib_http
+        config = dict(self.KEYS, LAST30DAYS_WEB_BACKENDS="exa,keenable")
+
+        def failing(query, date_range, key, count=5):
+            lib_http._failure_sink.get().append(lib_http.HTTPError("boom", status_code=500))
+            raise lib_http.HTTPError("boom", status_code=500)
+
+        with patch("lib.grounding.exa_search", return_value=([_hit("https://a.com/1", item_id="WE1")], {})), \
+             patch("lib.grounding.keenable_search", side_effect=failing):
+            with lib_http.capture_failures() as sink:
+                items, _ = grounding.web_search("q", self.DR, config, backend="auto")
+        self.assertEqual(1, len(items))
+        self.assertEqual([], sink)
+
+
+def _mock_kw(v):
+    if isinstance(v, Exception):
+        return {"side_effect": v}
+    return {"return_value": v}

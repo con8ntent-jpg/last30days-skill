@@ -1,0 +1,1 @@
+Query several web search backends at once: set `LAST30DAYS_WEB_BACKENDS` to a comma list (for example `exa,parallel,keenable`) or `all`, or pass `--web-backend all`. Backends run concurrently, results interleave by rank and dedupe by URL, and a failing backend no longer drops the others' results.

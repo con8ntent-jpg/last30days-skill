@@ -2036,6 +2036,9 @@ def diagnose(
         native_web_backend = "parallel"
     elif config.get("KEENABLE_API_KEY"):
         native_web_backend = "keenable"
+    web_fanout = grounding.fanout_backends(config)
+    if len(web_fanout) > 1:
+        native_web_backend = "+".join(web_fanout)
     providers_status = {
         "google": bool(google_key),
         "openai": bool(config.get("OPENAI_API_KEY")) and config.get("OPENAI_AUTH_STATUS") == env.AUTH_STATUS_OK,
@@ -2338,7 +2341,7 @@ def run(
         available.append("corpus")
     if web_backend == "none":
         available = [s for s in available if s != "grounding"]
-    elif web_backend in ("brave", "exa", "serper", "parallel", "keenable", "parallel-mcp", "keyless") and "grounding" not in available:
+    elif web_backend in ("brave", "exa", "serper", "parallel", "keenable", "all", "parallel-mcp", "keyless") and "grounding" not in available:
         available.append("grounding")
     if (
         hiring_signals_mode

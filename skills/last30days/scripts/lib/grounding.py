@@ -344,18 +344,135 @@ def _parse_serper_date(raw: str, now: datetime | None = None) -> str | None:
 # Dispatcher
 # ---------------------------------------------------------------------------
 
+# Keyed search API backends in auto-detect priority order, with the config
+# key each needs and the module-level search function that serves it (looked
+# up by name at call time so tests can patch it).
+_KEYED_BACKENDS: tuple[tuple[str, str, str], ...] = (
+    ("brave", "BRAVE_API_KEY", "brave_search"),
+    ("exa", "EXA_API_KEY", "exa_search"),
+    ("serper", "SERPER_API_KEY", "serper_search"),
+    ("parallel", "PARALLEL_API_KEY", "parallel_search"),
+    ("keenable", "KEENABLE_API_KEY", "keenable_search"),
+)
+_KEYED_BY_NAME = {name: (key, fn) for name, key, fn in _KEYED_BACKENDS}
+
+# Opt-in fan-out: comma list of keyed backends (or "all") to query together.
+WEB_BACKENDS_VAR = "LAST30DAYS_WEB_BACKENDS"
+
+
 def configured_backend(config: dict) -> str | None:
     """Return the first configured search API backend, excluding keyless search."""
-    for backend, key in (
-        ("brave", "BRAVE_API_KEY"),
-        ("exa", "EXA_API_KEY"),
-        ("serper", "SERPER_API_KEY"),
-        ("parallel", "PARALLEL_API_KEY"),
-        ("keenable", "KEENABLE_API_KEY"),
-    ):
+    for backend, key, _fn in _KEYED_BACKENDS:
         if config.get(key):
             return backend
     return None
+
+
+def configured_backends(config: dict) -> list[str]:
+    """Every keyed backend that has its credential, in priority order."""
+    return [name for name, key, _fn in _KEYED_BACKENDS if config.get(key)]
+
+
+def fanout_backends(config: dict) -> list[str]:
+    """Backends named by LAST30DAYS_WEB_BACKENDS that are usable, in the
+    order given. Unknown names and backends without a key are skipped."""
+    raw = str(config.get(WEB_BACKENDS_VAR) or "").strip().lower()
+    if not raw:
+        return []
+    if raw == "all":
+        return configured_backends(config)
+    names: list[str] = []
+    for part in raw.split(","):
+        name = part.strip()
+        if not name or name in names:
+            continue
+        spec = _KEYED_BY_NAME.get(name)
+        if spec is None:
+            sys.stderr.write(f"[Web] Ignoring unknown {WEB_BACKENDS_VAR} entry: {name!r}\n")
+            continue
+        if not config.get(spec[0]):
+            sys.stderr.write(f"[Web] Skipping {name}: {spec[0]} is not set\n")
+            continue
+        names.append(name)
+    return names
+
+
+def _run_keyed(name: str, query: str, date_range: tuple[str, str], config: dict):
+    key_var, fn_name = _KEYED_BY_NAME[name]
+    key = config.get(key_var)
+    if not key:
+        raise RuntimeError(f"{key_var} is required when web_backend='{name}'")
+    return globals()[fn_name](query, date_range, key)
+
+
+def _url_key(url: str) -> str:
+    parsed = urlparse(url.strip())
+    host = (parsed.netloc or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    path = parsed.path.rstrip("/")
+    return f"{host}{path}" + (f"?{parsed.query}" if parsed.query else "")
+
+
+def _fanout_search(
+    names: list[str], query: str, date_range: tuple[str, str], config: dict,
+) -> tuple[list[dict], dict]:
+    """Query several keyed backends concurrently and merge their results.
+
+    Each backend runs in its own failure-capture context, so one backend's
+    HTTP error is not recorded against the grounding source while the others
+    returned results. Only when every backend fails does the first error
+    propagate. Results interleave by rank (every backend's #1, then #2, ...)
+    and collapse on URL; the kept item lists every backend that found it.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    def work(name: str):
+        with http.capture_failures():
+            try:
+                return name, _run_keyed(name, query, date_range, config), None
+            except Exception as exc:  # noqa: BLE001 - isolate per backend
+                return name, None, exc
+
+    with ThreadPoolExecutor(max_workers=len(names)) as pool:
+        futures = [http.submit_with_context(pool, work, name) for name in names]
+        outcomes = [f.result() for f in futures]
+
+    succeeded = [(name, result[0]) for name, result, exc in outcomes if exc is None]
+    if not succeeded:
+        raise next(exc for _name, _result, exc in outcomes if exc is not None)
+    counts: dict[str, int | str] = {}
+    for name, result, exc in outcomes:
+        if exc is not None:
+            counts[name] = "error"
+            sys.stderr.write(f"[Web] {name} search failed: {type(exc).__name__}: {exc}\n")
+        else:
+            counts[name] = len(result[0])
+
+    merged: list[dict] = []
+    by_url: dict[str, dict] = {}
+    depth = max((len(items) for _name, items in succeeded), default=0)
+    for rank in range(depth):
+        for name, items in succeeded:
+            if rank >= len(items):
+                continue
+            item = dict(items[rank])
+            key = _url_key(item.get("url", ""))
+            kept = by_url.get(key)
+            if kept is not None:
+                if name not in kept["metadata"]["web_backends"]:
+                    kept["metadata"]["web_backends"].append(name)
+                continue
+            item["metadata"] = dict(item.get("metadata") or {}, web_backends=[name])
+            by_url[key] = item
+            merged.append(item)
+    artifact = {
+        "label": "+".join(name for name, _items in succeeded),
+        "webSearchQueries": [query],
+        "resultCount": len(merged),
+        "backends": counts,
+    }
+    return merged, artifact
 
 
 def web_search(
@@ -364,38 +481,35 @@ def web_search(
     config: dict,
     backend: str = "auto",
 ) -> tuple[list[dict], dict]:
-    """Run web search with the specified or auto-detected backend."""
-    if backend == "auto":
+    """Run web search with the specified or auto-detected backend.
+
+    ``backend="all"`` queries every keyed backend that has a key. With
+    ``backend="auto"``, LAST30DAYS_WEB_BACKENDS (a comma list or ``all``)
+    opts into querying several backends together; an explicit single backend
+    always wins over that setting.
+    """
+    fanout: list[str] = []
+    if backend == "all":
+        fanout = configured_backends(config)
+        if not fanout:
+            raise RuntimeError(
+                "web_backend='all' needs at least one of "
+                + ", ".join(key for _n, key, _f in _KEYED_BACKENDS)
+            )
+    elif backend == "auto":
+        fanout = fanout_backends(config)
+    if len(fanout) == 1:
+        backend, fanout = fanout[0], []
+    elif backend == "auto":
         backend = configured_backend(config) or (
             "keyless" if env.keyless_web_allowed(config) else "none"
         )
     items: list[dict] = []
     artifact: dict = {}
-    if backend == "brave":
-        key = config.get("BRAVE_API_KEY")
-        if not key:
-            raise RuntimeError("BRAVE_API_KEY is required when web_backend='brave'")
-        items, artifact = brave_search(query, date_range, key)
-    elif backend == "exa":
-        key = config.get("EXA_API_KEY")
-        if not key:
-            raise RuntimeError("EXA_API_KEY is required when web_backend='exa'")
-        items, artifact = exa_search(query, date_range, key)
-    elif backend == "serper":
-        key = config.get("SERPER_API_KEY")
-        if not key:
-            raise RuntimeError("SERPER_API_KEY is required when web_backend='serper'")
-        items, artifact = serper_search(query, date_range, key)
-    elif backend == "parallel":
-        key = config.get("PARALLEL_API_KEY")
-        if not key:
-            raise RuntimeError("PARALLEL_API_KEY is required when web_backend='parallel'")
-        items, artifact = parallel_search(query, date_range, key)
-    elif backend == "keenable":
-        key = config.get("KEENABLE_API_KEY")
-        if not key:
-            raise RuntimeError("KEENABLE_API_KEY is required when web_backend='keenable'")
-        items, artifact = keenable_search(query, date_range, key)
+    if fanout:
+        items, artifact = _fanout_search(fanout, query, date_range, config)
+    elif backend in _KEYED_BY_NAME:
+        items, artifact = _run_keyed(backend, query, date_range, config)
     elif backend == "parallel-mcp":
         items, artifact = parallel_mcp.search(
             query, date_range, config.get("PARALLEL_API_KEY")
