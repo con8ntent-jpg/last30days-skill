@@ -1,0 +1,1 @@
+Exa web search now follows Exa's recommended request: token-efficient `contents.highlights` instead of 2,000-character full text, plus an `objective` describing the research step so ranking favors primary sources. Snippets are built from the returned highlights (falling back to `text`).

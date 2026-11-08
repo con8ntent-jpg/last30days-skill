@@ -230,21 +230,21 @@ class ExaSearchTests(unittest.TestCase):
                 {
                     "title": "Exa Result",
                     "url": "https://example.com/exa",
-                    "text": "An exa snippet about AI trends",
+                    "highlights": ["An exa snippet", "about AI trends"],
                     "publishedDate": "2026-03-15T00:00:00.000Z",
                     "score": 0.85,
                 },
                 {
                     "title": "Old Exa Result",
                     "url": "https://example.com/old-exa",
-                    "text": "Should be filtered out",
+                    "highlights": ["Should be filtered out"],
                     "publishedDate": "2025-12-01T00:00:00.000Z",
                     "score": 0.7,
                 },
                 {
                     "title": "Undated Exa Result",
                     "url": "https://example.com/undated-exa",
-                    "text": "Kept because date is unknown",
+                    "highlights": ["Kept because date is unknown"],
                 },
             ]
         }
@@ -264,6 +264,41 @@ class ExaSearchTests(unittest.TestCase):
             self.assertEqual("POST", call_args.args[0])
             self.assertEqual("https://api.exa.ai/search", call_args.args[1])
             self.assertEqual("fake-exa-key", call_args.kwargs["headers"]["x-api-key"])
+            self.assertEqual("An exa snippet … about AI trends", items[0]["snippet"])
+            body = call_args.kwargs["json_data"]
+            # Recommended Exa request: highlights only, no stacked text/summary
+            # and no character budget.
+            self.assertEqual({"highlights": True}, body["contents"])
+            self.assertEqual("auto", body["type"])
+            self.assertEqual(5, body["numResults"])
+            # The 30-day research window is a hard bound the engine enforces.
+            self.assertEqual("2026-02-25T00:00:00.000Z", body["startPublishedDate"])
+            self.assertEqual("2026-03-27T23:59:59.999Z", body["endPublishedDate"])
+            # Engine searches are one step of a larger task, so they carry an objective.
+            self.assertIsInstance(body["objective"], str)
+            self.assertTrue(body["objective"].strip())
+            self.assertLessEqual(len(body["objective"]), 4096)
+
+    def test_exa_search_snippet_falls_back_to_text_and_truncates(self):
+        mock_response = {
+            "results": [
+                {
+                    "title": "Text only",
+                    "url": "https://example.com/text-only",
+                    "text": "z" * 900,
+                    "publishedDate": "2026-03-15T00:00:00.000Z",
+                },
+                {
+                    "title": "No content",
+                    "url": "https://example.com/no-content",
+                    "publishedDate": "2026-03-16T00:00:00.000Z",
+                },
+            ]
+        }
+        with patch("lib.grounding.http.request", return_value=mock_response):
+            items, _ = grounding.exa_search("test", ("2026-02-25", "2026-03-27"), "key")
+        self.assertEqual(500, len(items[0]["snippet"]))
+        self.assertEqual("", items[1]["snippet"])
 
     def test_exa_search_returns_empty_for_no_results(self):
         with patch("lib.grounding.http.request", return_value={"results": []}):
