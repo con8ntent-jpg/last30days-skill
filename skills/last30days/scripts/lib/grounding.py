@@ -86,6 +86,29 @@ def brave_search(
 # Exa AI Search
 # ---------------------------------------------------------------------------
 
+# Every engine web search is one step of a larger research run (topic research,
+# entity/handle resolution, competitor and hiring discovery), so Exa gets the
+# goal that step serves alongside the query.
+_EXA_OBJECTIVE = (
+    "One retrieval step of a research brief on what happened and what people "
+    "said about this topic inside the requested date window. Rank primary "
+    "sources first: official announcements, original reporting, first-hand "
+    "posts and discussions, and project or profile pages. Exclude SEO "
+    "listicles, scraped aggregators, and pages that only restate older "
+    "coverage. Pull concrete facts: names, handles, dates, figures, quotes, "
+    "and links."
+)
+
+
+def _exa_snippet(result: dict) -> str:
+    highlights = result.get("highlights")
+    if isinstance(highlights, list):
+        text = " … ".join(h.strip() for h in highlights if isinstance(h, str) and h.strip())
+    else:
+        text = result.get("text") or ""
+    return text[:500]
+
+
 def exa_search(
     query: str, date_range: tuple[str, str], api_key: str, count: int = 5,
 ) -> tuple[list[dict], dict]:
@@ -94,11 +117,12 @@ def exa_search(
         headers={"x-api-key": api_key},
         json_data={
             "query": query,
+            "objective": _EXA_OBJECTIVE,
             "type": "auto",
             "numResults": count,
             "startPublishedDate": f"{date_range[0]}T00:00:00.000Z",
             "endPublishedDate": f"{date_range[1]}T23:59:59.999Z",
-            "contents": {"text": {"maxCharacters": 2000}},
+            "contents": {"highlights": True},
         },
         timeout=15,
     )
@@ -118,7 +142,7 @@ def exa_search(
             "title": r.get("title", ""),
             "url": url,
             "source_domain": _domain(url),
-            "snippet": (r.get("text") or "")[:500],
+            "snippet": _exa_snippet(r),
             "date": pub_date,
             "relevance": 0.8,
             "why_relevant": "Exa web search",
