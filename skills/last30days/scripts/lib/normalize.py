@@ -442,6 +442,9 @@ def _normalize_youtube(
         # video should be subtracted from the degraded-transcript-ratio
         # denominator (it was never going to produce a transcript).
         metadata["captions_disabled"] = True
+    for key in ("collection_backend", "channel_id", "comments_status", "transcript_status"):
+        if item.get(key):
+            metadata[key] = str(item[key])
     metadata["top_comments"] = _remap_comments(
         item.get("top_comments") or [],
         score_keys=("score", "likes"),

@@ -200,6 +200,32 @@ The source table covers the engine's research sources and optional comment or tr
 
 **Reddit keyless pacing.** Unauthenticated reddit.com requests (site search, listing partials, shreddit) share one token bucket. The default is `1` request per second with a burst of 2, slow enough that engine fan-out does not trip HTTP 429 on a typical home IP. Set `LAST30DAYS_REDDIT_KEYLESS_RATE` to a float req/sec to trade wall-clock for coverage: higher finishes faster and loses more sub-requests to 429; lower is safer and slower. Invalid or non-positive values fall back to `1`. A 429'd search or listing sub-request is retried once after a short jittered pause, still through the limiter. Identical reddit.com requests within one command (subreddit listings, listing feeds, comment pages, which repeat across subqueries) are fetched once and memoized, so a typical four-subquery run issues roughly a quarter of the requests it used to. Comment enrichment covers 4 / 8 / 12 threads per subquery at quick / default / deep depth. This does not change ScrapeCreators routing (`LAST30DAYS_REDDIT_BACKEND` / `LAST30DAYS_REDDIT_SC_MIN_ITEMS`).
 
+**Official YouTube Data API.** Set `YOUTUBE_API_KEY` in the global
+`~/.config/last30days/.env` (or the process environment) to use the official
+YouTube Data API v3 for `/last30days` public video search, metadata/statistics
+and top comments. Create a dedicated key in Google Cloud, enable
+`youtube.googleapis.com`, and restrict that key to this API. No channel OAuth
+or private-account access is requested. The key is sent in a header and is
+never written into request URLs, raw results or error messages.
+
+This backend is selected when the dedicated key is present. Without it the
+existing yt-dlp/ScrapeCreators path is unchanged; `LAST30DAYS_YOUTUBE_BACKEND=yt-dlp`
+also disables the official backend. `EXCLUDE_SOURCES=youtube_comments` disables
+comment collection. One query uses one search page (6/8/40 videos by depth), one
+batched metadata request and at most three comment requests (five top-level
+comments each, not a complete comment census). There is no automatic pagination
+or API retry. Quota/auth failures and incomplete enrichment remain visible in
+source status; a configured but rejected API key is not silently ignored.
+
+Search is date-bounded; `evergreen_ok` removes the lower date bound only. Search
+quota is limited separately by Google; consult the project's actual quota page
+rather than assuming unlimited calls. Transcripts still use the existing
+bounded yt-dlp/ScrapeCreators path. Data API captions download requires OAuth
+and permission to edit the video, so this key cannot supply arbitrary public
+transcripts. Raw YouTube metadata records `collection_backend`, `channel_id`,
+`comments_status` and `transcript_status`. A metadata-only video is not a
+watched/transcribed video.
+
 **YouTube proxy.** Set `YOUTUBE_PROXY` (or the shorter alias `YT_PROXY`) to route all yt-dlp traffic through a proxy. Useful when YouTube is blocked in your region. Accepts any proxy URL that yt-dlp supports: `socks5://127.0.0.1:1080`, `http://proxy.example.com:3128`, etc. `YOUTUBE_PROXY` takes precedence over `YT_PROXY`. Only yt-dlp calls are routed through this proxy — other HTTP requests the skill makes (ScrapeCreators, OpenAI, etc.) are unaffected. To route all traffic, use the standard `HTTP_PROXY` / `HTTPS_PROXY` environment variables instead.
 
 ```bash
@@ -623,7 +649,7 @@ Every live run writes its JSON result to `~/.config/last30days/doctor-cache.json
 | `BROWSER_CDP_URL` | Explicit Chrome DevTools endpoint (e.g. `http://127.0.0.1:18800`) for the extra-host CDP cookie lookup. Preferred over the `18800` / `9222`+`$DISPLAY` defaults. Extra hosts only; setting an endpoint does not grant browser-cookie consent. |
 | `LAST30DAYS_REDDIT_BACKEND` | `scrapecreators` makes ScrapeCreators the primary Reddit backend; doctor renders Reddit's conditional routing with the pin applied. |
 | `LAST30DAYS_REDDIT_SC_MIN_ITEMS` | Integer thinness floor for ScrapeCreators Reddit **search** backfill. Default `5`: backfill when the free path returns fewer than 5 items, spending ScrapeCreators credits. Set another positive count to move the floor, or `0` to backfill only when the free path returns nothing. Unset or blank means `5`; a malformed value behaves like `0` (spends nothing extra). A run makes at most one ScrapeCreators Reddit backfill per distinct query, date window, and subreddit set, and each backfill is several API calls (searches plus comment fetches, roughly 10 at default depth). A failed backfill after free items only adds a detail note. Merged results dedupe by post id. Requires `SCRAPECREATORS_API_KEY`. Ignored when `LAST30DAYS_REDDIT_BACKEND=scrapecreators` (SC is already primary). |
-| `LAST30DAYS_YOUTUBE_BACKEND` | `yt-dlp` keeps YouTube off ScrapeCreators (search backfill, transcript rescue, and comments) while `SCRAPECREATORS_API_KEY` still serves TikTok, Instagram, and Reddit; yt-dlp then uses the keyless retry budget. Unset or any other value keeps the default yt-dlp → ScrapeCreators chain. Doctor shows the pin and the disarmed backstop. |
+| `LAST30DAYS_YOUTUBE_BACKEND` | `yt-dlp` keeps YouTube off ScrapeCreators (search backfill, transcript rescue, and comments) while `SCRAPECREATORS_API_KEY` still serves TikTok, Instagram, and Reddit; yt-dlp then uses the keyless retry budget. Otherwise `YOUTUBE_API_KEY` selects the official API; without that key the default yt-dlp → ScrapeCreators chain remains. Doctor shows the pin and the disarmed backstop. |
 | `LAST30DAYS_YT_SC_MIN_ITEMS` | Keyed YouTube search backfill floor. Default `3`; `0` restores empty-only search fallback. Invalid values behave like `0`. See [YouTube search backfill](#youtube-search-backfill) for per-stream credit usage and retry behavior. |
 
 Web search has **no** env pin — pin it per-run with `--web-backend=<name>` only (see [Web search backend priority](#web-search-backend-priority)).

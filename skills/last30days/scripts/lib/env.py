@@ -611,6 +611,7 @@ def get_config(policy: ConfigLoadPolicy | None = None) -> dict[str, Any]:
         ('LAST30DAYS_DEBUG', None),
         ('XAI_API_KEY', None),
         ('GOOGLE_API_KEY', None),
+        ('YOUTUBE_API_KEY', None),
         ('GEMINI_API_KEY', None),
         ('GOOGLE_GENAI_API_KEY', None),
         ('XIAOHONGSHU_API_BASE', None),
@@ -1649,7 +1650,7 @@ def is_youtube_comments_available(config: dict[str, Any]) -> bool:
     """
     if 'youtube_comments' in _parse_exclude_sources(config):
         return False
-    if is_ytdlp_available():
+    if is_youtube_api_available(config) or is_ytdlp_available():
         return True
     if not is_youtube_sc_available(config):
         return False
@@ -1688,6 +1689,11 @@ def youtube_backend_pin(config: dict[str, Any]) -> str:
     if raw == 'ytdlp':
         raw = 'yt-dlp'
     return raw if raw in YOUTUBE_BACKEND_PIN_VALUES else ''
+
+
+def is_youtube_api_available(config: dict[str, Any]) -> bool:
+    """The dedicated official public-data key wins unless YouTube is pinned keyless."""
+    return bool(config.get('YOUTUBE_API_KEY')) and youtube_backend_pin(config) != 'yt-dlp'
 
 
 def is_youtube_sc_available(config: dict[str, Any]) -> bool:

@@ -67,9 +67,9 @@ TIER_ERROR = "error"
 # the grounding-auto parity test rather than an import.
 WEB_BACKEND_ORDER: Tuple[str, ...] = ("brave", "exa", "serper", "parallel", "keenable", "keyless")
 
-# YouTube backend order (pipeline: yt-dlp first, ScrapeCreators search
-# fallback when yt-dlp is absent or fails — see lib/pipeline.py).
-YOUTUBE_BACKEND_ORDER: Tuple[str, ...] = ("yt-dlp", "scrapecreators")
+# A dedicated YouTube API key selects official public reads. Without it,
+# the existing yt-dlp -> ScrapeCreators path applies; yt-dlp pin is keyless.
+YOUTUBE_BACKEND_ORDER: Tuple[str, ...] = ("youtube-api", "yt-dlp", "scrapecreators")
 
 # Chain-failure fixes embed the registry's CLI forms (KTD 7): the command a
 # backend finding prescribes and the one doctor/quality-nudge render for the
@@ -553,6 +553,11 @@ DESCRIPTORS: Dict[str, ChainDescriptor] = {
         source="youtube",
         mode=MODE_ALTERNATIVE,
         backends=(
+            BackendSpec(
+                name="youtube-api", requires="YOUTUBE_API_KEY (public YouTube Data API v3)",
+                probe=_key_probe("youtube-api", "YOUTUBE_API_KEY", "YouTube Data API v3 key",
+                                 "set YOUTUBE_API_KEY or install yt-dlp"),
+            ),
             BackendSpec(
                 name="yt-dlp",
                 requires="yt-dlp on the agent-subprocess PATH",

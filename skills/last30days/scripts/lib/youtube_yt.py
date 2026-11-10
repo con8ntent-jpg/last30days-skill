@@ -1687,6 +1687,8 @@ def backfill_transcripts(
         if not transcript:
             continue
         it.metadata["transcript_snippet"] = transcript
+        if it.metadata.get("collection_backend") == "youtube-data-api":
+            it.metadata["transcript_status"] = "available"
         highlights = extract_transcript_highlights(transcript, topic)
         if highlights:
             it.metadata["transcript_highlights"] = highlights

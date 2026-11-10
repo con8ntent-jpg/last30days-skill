@@ -81,6 +81,7 @@ from . import (
     xquik,
     xurl_x,
     youtube_yt,
+    youtube_api,
 )
 from .cluster import cluster_candidates
 from . import fusion
@@ -389,7 +390,7 @@ def available_sources(
             x_pending = env.x_pending_browser_auth(config)
         if x_pending:
             available.append("x")
-    if which("yt-dlp") or env.is_youtube_sc_available(config):
+    if which("yt-dlp") or env.is_youtube_sc_available(config) or env.is_youtube_api_available(config):
         available.append("youtube")
     available.extend(["hackernews", "polymarket"])
     # StockTwits is gated to ticker/crypto topics only (flag set in run()).
@@ -5578,6 +5579,15 @@ def _fetch_youtube_stream_live(
     has_ytdlp: bool,
     freshness_mode: str | None,
 ) -> tuple[list[dict], dict]:
+    if env.is_youtube_api_available(config):
+        result = youtube_api.collect(
+            yt_query, from_date, to_date, depth, config,
+            has_ytdlp=has_ytdlp, freshness_mode=freshness_mode,
+        )
+        artifact = {"_source_outcome_detail": "Collected with YouTube Data API v3"}
+        if result.get("error"):
+            artifact = _outcome_artifact(result.get("state", health.ERROR), result["error"])
+        return result.get("items", []), artifact
     result = None
     run_over = False
     youtube_failure: str | None = None
@@ -6175,6 +6185,7 @@ def _retrieve_stream_impl(
                 "youtube", yt_query, from_date, to_date, depth, freshness_mode, has_ytdlp,
                 env.is_youtube_sc_available(config),
                 env.youtube_sc_min_items(config),
+                env.is_youtube_api_available(config),
                 env.is_youtube_comments_available(config),
                 _comparison_entity_count(config),
             ),

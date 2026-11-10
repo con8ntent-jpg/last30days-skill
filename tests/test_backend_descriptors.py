@@ -194,7 +194,7 @@ class TestDescriptorRegistry:
 
     def test_youtube_and_web_chains_declared_in_order(self):
         yt = backends.get_descriptor("youtube")
-        assert tuple(s.name for s in yt.backends) == ("yt-dlp", "scrapecreators")
+        assert tuple(s.name for s in yt.backends) == ("youtube-api", "yt-dlp", "scrapecreators")
         web = backends.get_descriptor("web")
         assert tuple(s.name for s in web.backends) == (
             "brave", "exa", "serper", "parallel", "keenable", "keyless",

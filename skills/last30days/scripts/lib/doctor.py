@@ -634,6 +634,9 @@ def _youtube_record(config):
     if record["status"] != health.OK:
         return record
     notes: List[str] = []
+    if env.is_youtube_api_available(config):
+        record["note"] = "YouTube Data API for public search, metadata and comments; transcripts use yt-dlp separately"
+        return record
     # yt-dlp already provides search + transcripts. A transcription key only
     # backfills captions for the occasional caption-free video - an enhancement,
     # not a sign YouTube is broken.
